@@ -352,8 +352,8 @@ def batch_appsheet_write(table: str, action: str, rows: list) -> int:
 def log_run_appsheet(photos_scanned: int, photos_modified: int,
                      errors: int, summary: str):
     """Append a run_history record to AppSheet."""
-    run_id   = "run_" + datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
-    run_date = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    run_id   = "run_" + datetime.datetime.now(datetime.UTC).strftime("%Y%m%d_%H%M%S_%f")
+    run_date = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S")
     status   = "SUCCESS" if errors == 0 else "PARTIAL"
     try:
         batch_appsheet_write("run_history", "Add", [{
@@ -421,7 +421,7 @@ def main():
         "metadata_written": 0, "errors": 0,
     }
 
-    today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    today_str = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
 
     for p in all_photos:
 
