@@ -214,5 +214,6 @@ MIT License — see [LICENSE](LICENSE) for details.
 ## Acknowledgements
 
 - [osxphotos](https://github.com/RhetTbull/osxphotos) by RhetTbull — the incredible library that makes Apple Photos scriptable
+- [ExifTool](https://exiftool.org) by Phil Harvey — bakes metadata (keywords, faces, GPS) into exported files before Google Photos upload
 - [AppSheet](https://about.appsheet.com) — no-code database backend
 - [Smartsheet](https://www.smartsheet.com) — dashboard and reporting
