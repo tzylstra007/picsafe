@@ -30,6 +30,7 @@ Usage:
     python picsafe_bridge_v2_appsheet.py
 """
 
+import argparse
 import os
 import sys
 import time
@@ -145,6 +146,7 @@ def write_metadata_to_photo(uuid: str,
 
         if tags_add or tags_remove:
             sl.append("  set currentTags to keywords of targetItem")
+            sl.append("  if currentTags is missing value then set currentTags to {}")
             for t in tags_remove:
                 sl.extend([
                     f'  if currentTags contains "{t}" then',
@@ -375,10 +377,19 @@ def log_run_appsheet(photos_scanned: int, photos_modified: int,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    parser = argparse.ArgumentParser(description="PicSafe v2 Bridge")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Scan Photos and compute changes but do NOT write anything "
+                             "(no AppleScript, no AppSheet, no Smartsheet, no run log)")
+    args = parser.parse_args()
+    dry_run = args.dry_run
+
     start_time = time.time()
     print(f"\n{'='*62}")
     print(f"  {SCRIPT_NAME}")
     print(f"  {datetime.datetime.now().strftime('%Y-%m-%d  %H:%M:%S')}")
+    if dry_run:
+        print(f"  *** DRY-RUN MODE — no writes will occur ***")
     print(f"{'='*62}\n")
 
     # ── 1. External connections ────────────────────────────────────────────
@@ -509,12 +520,17 @@ def main():
 
         # ── Step 7: Write metadata back to Apple Photos ───────────────────
         if new_title or tags_add or tags_remove:
-            ok = write_metadata_to_photo(p.uuid, new_title, tags_add, tags_remove)
+            if dry_run:
+                logging.debug(f"DRY-RUN: would write to {p.uuid[:8]}… "
+                              f"title={new_title!r} add={tags_add} remove={tags_remove}")
+                ok = True  # simulate success in dry-run
+            else:
+                ok = write_metadata_to_photo(p.uuid, new_title, tags_add, tags_remove)
+                time.sleep(0.1)   # throttle: prevent Photos.app crashes
             if ok:
                 stats["metadata_written"] += 1
             else:
                 stats["errors"] += 1
-            time.sleep(0.1)   # throttle: prevent Photos.app crashes
 
         # ── Per-person stats for Smartsheet dashboard ─────────────────────
         is_video = not bool(getattr(p, "isphoto", True))
@@ -585,13 +601,21 @@ def main():
             )
 
     # ── 4. AppSheet batch sync ─────────────────────────────────────────────
-    print(f"\n   AppSheet sync: {len(to_add):,} new  +  {len(to_update):,} updates ...")
-    added   = batch_appsheet_write("assets", "Add",  to_add)
-    updated = batch_appsheet_write("assets", "Edit", to_update)
-    print(f"      Added {added:,}  |  Updated {updated:,}")
+    if dry_run:
+        added   = 0
+        updated = 0
+        print(f"\n   DRY-RUN: would Add {len(to_add):,} / Edit {len(to_update):,} AppSheet records (skipped)")
+    else:
+        print(f"\n   AppSheet sync: {len(to_add):,} new  +  {len(to_update):,} updates ...")
+        added   = batch_appsheet_write("assets", "Add",  to_add)
+        updated = batch_appsheet_write("assets", "Edit", to_update)
+        print(f"      Added {added:,}  |  Updated {updated:,}")
 
     # ── 5. Smartsheet dashboard update ────────────────────────────────────
-    update_smartsheet_dashboard(ss, per_person)
+    if dry_run:
+        print(f"   DRY-RUN: Smartsheet dashboard update skipped")
+    else:
+        update_smartsheet_dashboard(ss, per_person)
 
     # ── 6. Log run ─────────────────────────────────────────────────────────
     elapsed = int(time.time() - start_time)
@@ -604,8 +628,11 @@ def main():
         f"Metadata writes {stats['metadata_written']:,} | "
         f"Errors {stats['errors']}"
     )
-    log_run_appsheet(stats["scanned"], stats["metadata_written"],
-                     stats["errors"], summary)
+    if dry_run:
+        print(f"   DRY-RUN: run log skipped  ({summary})")
+    else:
+        log_run_appsheet(stats["scanned"], stats["metadata_written"],
+                         stats["errors"], summary)
 
     # ── Final summary ──────────────────────────────────────────────────────
     print(f"\n{'='*62}")
