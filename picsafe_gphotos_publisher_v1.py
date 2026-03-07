@@ -29,6 +29,7 @@ import os
 import sys
 import time
 import subprocess
+import shutil
 import json
 import requests
 import smartsheet
@@ -50,6 +51,7 @@ try:
     SMARTSHEET_TOKEN     = picsafe_secrets.SMARTSHEET_ACCESS_TOKEN.strip()
     GOOGLE_CREDS_FILE    = picsafe_secrets.GOOGLE_CREDENTIALS_FILE
     GOOGLE_TOKEN_FILE    = picsafe_secrets.GOOGLE_TOKEN_FILE
+    NETLIFY_SITE_ID      = getattr(picsafe_secrets, "NETLIFY_SITE_ID", "").strip()
 except (ImportError, AttributeError) as e:
     print(f"❌ CREDENTIAL ERROR: {e}")
     sys.exit(1)
@@ -72,6 +74,10 @@ GPHOTOS_BASE   = "https://photoslibrary.googleapis.com/v1"
 PHOTO_EXTS = {'.jpg', '.jpeg', '.heic', '.png', '.gif', '.tif', '.tiff', '.webp', '.bmp'}
 VIDEO_EXTS = {'.mp4', '.mov', '.m4v', '.avi', '.mkv', '.wmv', '.3gp'}
 UPLOAD_EXTS = PHOTO_EXTS | VIDEO_EXTS
+
+# Netlify vanity URL redirects
+NETLIFY_DEPLOY_DIR = os.path.expanduser("~/PicSafe/netlify_deploy")
+NETLIFY_REDIRECTS  = os.path.join(NETLIFY_DEPLOY_DIR, "_redirects")
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +390,80 @@ def picsafe_id_from_filename(filename: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Netlify vanity URL sync
+# ---------------------------------------------------------------------------
+
+def sync_netlify_redirects(ss_client) -> int:
+    """
+    Build a fresh Netlify _redirects file from Smartsheet and deploy it.
+
+    For every row where 'Go Live' is checked, 'Smell Adjectives' is non-empty,
+    and 'Google Photos Share Link' is non-empty, write a redirect:
+        /<smell_adjective_slug>   <google_photos_share_link>   301
+
+    The _redirects file is fully regenerated on every run (idempotent).
+    Returns the count of redirects written (0 if nothing to deploy or NETLIFY_SITE_ID unset).
+    """
+    if not NETLIFY_SITE_ID:
+        print("   ⚠️  NETLIFY_SITE_ID not set — skipping vanity URL sync")
+        return 0
+
+    print("\n🌐  NETLIFY VANITY URL SYNC...")
+    sheet   = ss_client.Sheets.get_sheet(SMARTSHEET_ID)
+    col_map = {c.title: c.id for c in sheet.columns}
+
+    required = ["Go Live", "Smell Adjectives", "Google Photos Share Link"]
+    missing  = [c for c in required if c not in col_map]
+    if missing:
+        print(f"   ❌ Missing columns: {missing} — skipping Netlify sync")
+        return 0
+
+    redirects = []
+    for row in sheet.rows:
+        cells     = {c.column_id: c.value for c in row.cells}
+        go_live   = bool(cells.get(col_map["Go Live"], False))
+        slug      = str(cells.get(col_map["Smell Adjectives"]) or "").strip().lower()
+        share_url = str(cells.get(col_map["Google Photos Share Link"]) or "").strip()
+        if go_live and slug and share_url:
+            redirects.append(f"/{slug}   {share_url}   301")
+
+    if not redirects:
+        print("   ℹ️  No rows qualify for vanity URLs — nothing to deploy")
+        return 0
+
+    os.makedirs(NETLIFY_DEPLOY_DIR, exist_ok=True)
+    with open(NETLIFY_REDIRECTS, "w") as f:
+        f.write("# PicSafe vanity URL redirects — auto-generated, do not edit manually\n")
+        f.write("# Format: /<slug>   <destination>   <status>\n\n")
+        f.write("\n".join(redirects) + "\n")
+
+    print(f"   📝 Written {len(redirects)} redirect(s) to {NETLIFY_REDIRECTS}")
+
+    netlify_bin = shutil.which("netlify") or "/usr/local/bin/netlify"
+    cmd = [netlify_bin, "deploy", "--prod",
+           "--dir", NETLIFY_DEPLOY_DIR,
+           "--site", NETLIFY_SITE_ID]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            print(f"   ✅ Netlify deploy successful! ({len(redirects)} redirect(s) live)")
+            if result.stdout:
+                # Print deploy URL if present in output
+                for line in result.stdout.splitlines():
+                    if "https://" in line:
+                        print(f"      {line.strip()}")
+        else:
+            print(f"   ❌ Netlify deploy failed (exit {result.returncode}):")
+            print(f"      {result.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        print("   ❌ Netlify deploy timed out after 60s")
+    except Exception as e:
+        print(f"   ❌ Netlify deploy error: {e}")
+
+    return len(redirects)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -637,6 +717,11 @@ def main():
 
     print(f"   📤 Flushing {len(pending_log_entries)} log entries to AppSheet...")
     as_db.add_audit_log(pending_log_entries)
+
+    # -----------------------------------------------------------------------
+    # Netlify vanity URL sync
+    # -----------------------------------------------------------------------
+    sync_netlify_redirects(ss_client)
 
     # -----------------------------------------------------------------------
     # Run summary

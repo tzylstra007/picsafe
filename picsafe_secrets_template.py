@@ -19,6 +19,11 @@ APPSHEET_API_KEY = "YOUR_APPSHEET_API_KEY_HERE"
 GOOGLE_CREDENTIALS = "/path/to/picsafe_google_credentials.json"
 GOOGLE_TOKEN       = "/path/to/picsafe_google_token.json"
 
+# Netlify site ID for vanity URL redirect sync (picsafe.net/<slug> → Google Photos)
+# Found at: Netlify dashboard → Site settings → General → Site details → Site ID
+# Leave blank to skip Netlify sync entirely.
+NETLIFY_SITE_ID = "YOUR_NETLIFY_SITE_ID_HERE"
+
 # Legacy / optional (not used in v2 pipeline)
 FLICKR_API_KEY = ""
 FLICKR_SECRET  = ""
