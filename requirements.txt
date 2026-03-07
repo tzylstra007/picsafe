@@ -1,0 +1,9 @@
+# PicSafe v2 Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# Note: osxphotos requires macOS and Apple Photos. All other dependencies
+# are cross-platform.
+
+osxphotos>=0.68.0
+smartsheet-python-sdk>=3.0.0
+requests>=2.31.0

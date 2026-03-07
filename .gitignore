@@ -1,0 +1,123 @@
+# ── SECRETS (NEVER commit real credentials) ───────────────────────────────────
+picsafe_secrets.py
+*.key
+*.token
+flickrkeys.txt
+
+# ── PYTHON ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── VIRTUAL ENVIRONMENT ───────────────────────────────────────────────────────
+venv/
+env/
+.venv/
+
+# ── DATABASE & STATE FILES ────────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+picsafe_sequence.txt
+
+# ── EXPORT & LOG FILES ────────────────────────────────────────────────────────
+picsafe_exported/
+PicSafe_Exported/
+ExportFaces*.txt
+*.log
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ── EDITOR ────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── GOOGLE OAUTH TOKENS (sensitive — never commit) ────────────────────────────
+*_credentials.json
+*_token.json
+client_secret*.json
+
+# ── OLD VERSIONED DEVELOPMENT SCRIPTS (not part of v2 release) ───────────────
+# Bridge iterations (keep only picsafe_bridge_v2_appsheet.py)
+picsafe_bridge_v[0-9]*.py
+PicSafe_Bridge_v*.py
+"PicSafe Bridge v*.py"
+!picsafe_bridge_v2_appsheet.py
+# Publisher iterations (keep only picsafe_gphotos_publisher_v1.py)
+picsafe_publisher*.py
+# Flickr, sync, and legacy utility scripts
+picsafe_flickr*.py
+picsafe_sync_*.py
+picsafe_debug*.py
+# Old caps-named scripts (v1 era)
+PicSafe_Export_v1.py
+PicSafe_Flickr_v2.py
+PicSafe_List_v2.py
+PicSafe_Master.sh
+"PicSafe Core.py"
+picsafe_core.py
+# One-off debug / test / utility scripts
+debug_*.py
+check_columns.py
+ghost_buster.py
+verify_*.py
+picsafe_reset.py
+picsafe_orchestrator.py
+picsafe_preflight.py
+picsafe_doctor.py
+picsafe_db_test.py
+picsafe_kill_wal.py
+picsafe_disable_cron.py
+picsafe_face_calibrator.py
+picsafe_inspect_selection.py
+picsafe_google_auth.py
+picsafe_appsheet_seed.py
+picsafe_appsheet_mcp_server.py
+picsafe_v2_init.py
+picsafe_list_v3.py
+
+# ── OLD TEXT FILES / DOCS (dev notes, old iterations) ─────────────────────────
+*.rtf
+"Untitled*.txt"
+"picsafe export requirements*.txt"
+"SoftwareXplained WebApp v*.txt"
+"AttachAlbum v*.txt"
+"CatchupFolders v*.txt"
+"Debug Bridge v*.txt"
+"DedupeFlickr v*.txt"
+"PicSafe Bridge v*.txt"
+"ListFaces v*.txt"
+"LIstFaces v*.txt"
+PicSafe_v2_AppSheet_Setup_Guide.docx
+PicSafe_v2_Architecture.md
+"PicSafe Custom Media Management Solution.pdf"
+"PicSafe Logo + Slogan v2.jpg"
+"PicSafe Photo Features*.png"
+"PicSafe Photo Features*.jpg"
+
+# ── TEMP / SCRATCH ─────────────────────────────────────────────────────────────
+Temp/
+*.db.bak*
+picsafe.db.bak*
+
+# ── WEB / NETLIFY (not part of Python CLI project) ────────────────────────────
+.netlify/
+index.html
+_redirects
+public/
+package.json
+usm_controller.js
