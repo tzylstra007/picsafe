@@ -10,7 +10,7 @@ nightly Google Photos publisher to pick up.
 
 Seven-Step Pipeline
 ───────────────────
-  1. Heart <-> Keyword Sync       — Favorite flag ↔ "Flagged" keyword
+  1. Heart <-> Keyword Sync       — Favorite flag ↔ "PicSafe Favorited" keyword
   2. Face Recognition Bridge      — Expose internal face data as keywords
   3. Missing Faces Detector (QA)  — Flag unnamed faces (quality ≥ 0.4 only)
   4. AI Scene Analysis            — Add high-confidence scene/object labels
@@ -55,6 +55,9 @@ FACE_QUALITY_THRESHOLD = 0.4
 # Rating keywords that trigger PicSafe ID minting (2+ stars)
 MINTING_RATING_KEYWORDS = {"2 Star", "3 Star", "4 Star", "5 Star"}
 
+# PicSafe ID sequence bounds
+SEQUENCE_MAX = 99999     # Highest mintable value → PicSafe_099999
+
 # Rating keywords required for PicSafe Ready status (3+ stars)
 READY_RATING_KEYWORDS = {"3 Star", "4 Star", "5 Star"}
 
@@ -94,16 +97,27 @@ logger = logging.getLogger()
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_next_sequence() -> str:
-    """Mint the next sequential PicSafe ID, e.g. PicSafe_042731."""
+    """Mint the next sequential PicSafe ID, e.g. PicSafe_042731.
+
+    Range: PicSafe_034500 – PicSafe_099999  (SEQUENCE_MAX = 99999).
+    Seed:  if the sequence file is absent it is initialised to 034499 so
+           the very first mint produces PicSafe_034500.
+    Raises RuntimeError when the sequence is exhausted.
+    """
     if not os.path.exists(SEQUENCE_FILE):
         with open(SEQUENCE_FILE, "w") as f:
-            f.write("000000")
+            f.write("034499")   # first mint → PicSafe_034500
     with open(SEQUENCE_FILE, "r") as f:
         try:
             current = int(f.read().strip())
         except ValueError:
-            current = 0
+            current = 34499
     next_val = current + 1
+    if next_val > SEQUENCE_MAX:
+        raise RuntimeError(
+            f"PicSafe ID sequence exhausted — all IDs up to "
+            f"PicSafe_{str(SEQUENCE_MAX).zfill(6)} have been used."
+        )
     with open(SEQUENCE_FILE, "w") as f:
         f.write(str(next_val).zfill(6))
     return f"PicSafe_{str(next_val).zfill(6)}"
@@ -225,12 +239,18 @@ def get_go_live_people(ss) -> set:
 
 def update_smartsheet_dashboard(ss, per_person: dict):
     """
-    Update the Smartsheet dashboard with Apple Photos counts and
-    PicSafe-Ready counts per person.
+    Update the Smartsheet dashboard with PicSafe-Ready counts from Apple Photos.
 
     per_person format:
       { "Person Name": {"ap_photos": int, "ap_videos": int,
                         "ready_photos": int, "ready_videos": int} }
+
+    Column mapping:
+      "Photos - AP"  ← ready_photos  (PicSafe Ready images in Apple Photos)
+      "Videos - AP"  ← ready_videos  (PicSafe Ready videos in Apple Photos)
+
+    Note: "Photos - Google" and "Videos - Google" are written by the publisher
+    (picsafe_gphotos_publisher_v1.py) which has access to the Google Photos API.
     """
     if not per_person:
         return
@@ -239,11 +259,9 @@ def update_smartsheet_dashboard(ss, per_person: dict):
         sheet = ss.Sheets.get_sheet(DASHBOARD_SHEET_ID)
         cols  = {c.title: c.id for c in sheet.columns}
 
-        name_col         = cols.get("Person Name")
-        ap_photos_col    = cols.get("Photos - AP")
-        ap_videos_col    = cols.get("Videos - AP")
-        ready_photos_col = cols.get("Photos - PicSafe Ready")
-        ready_videos_col = cols.get("Videos - PicSafe Ready")
+        name_col      = cols.get("Person Name")
+        ap_photos_col = cols.get("Photos - AP")   # ← PicSafe Ready photo count
+        ap_videos_col = cols.get("Videos - AP")   # ← PicSafe Ready video count
 
         # Build name -> row-id index
         row_map = {}
@@ -257,18 +275,13 @@ def update_smartsheet_dashboard(ss, per_person: dict):
             if person not in row_map:
                 continue
             cells = []
+            # Write PicSafe Ready counts (not raw AP totals) to the AP columns
             if ap_photos_col:
                 cells.append(smartsheet.models.Cell(
-                    {"column_id": ap_photos_col,    "value": pstats.get("ap_photos",    0)}))
+                    {"column_id": ap_photos_col, "value": pstats.get("ready_photos", 0)}))
             if ap_videos_col:
                 cells.append(smartsheet.models.Cell(
-                    {"column_id": ap_videos_col,    "value": pstats.get("ap_videos",    0)}))
-            if ready_photos_col:
-                cells.append(smartsheet.models.Cell(
-                    {"column_id": ready_photos_col, "value": pstats.get("ready_photos", 0)}))
-            if ready_videos_col:
-                cells.append(smartsheet.models.Cell(
-                    {"column_id": ready_videos_col, "value": pstats.get("ready_videos", 0)}))
+                    {"column_id": ap_videos_col, "value": pstats.get("ready_videos", 0)}))
             if cells:
                 updates.append(smartsheet.models.Row(
                     {"id": row_map[person], "cells": cells}))
@@ -310,6 +323,9 @@ def _appsheet_action(table: str, action: str, rows: list,
     resp = requests.post(url, headers=headers, json=payload, timeout=45)
     resp.raise_for_status()
 
+    # AppSheet sometimes returns 200 OK with an empty body on Edit/Add/Delete
+    if not resp.content or not resp.content.strip():
+        return []
     data = resp.json()
     if isinstance(data, list):
         return data
@@ -335,17 +351,22 @@ def load_appsheet_assets() -> dict:
 
 
 def batch_appsheet_write(table: str, action: str, rows: list) -> int:
-    """Write rows to AppSheet in safe batches. Returns count written."""
+    """Write rows to AppSheet in safe batches. Returns count written.
+    Includes a short sleep between batches to avoid AppSheet rate-limit 400s."""
     written = 0
+    total_batches = (len(rows) + APPSHEET_BATCH - 1) // APPSHEET_BATCH
     for i in range(0, len(rows), APPSHEET_BATCH):
         chunk = rows[i:i + APPSHEET_BATCH]
+        batch_num = i // APPSHEET_BATCH + 1
         try:
             _appsheet_action(table, action, chunk)
             written += len(chunk)
         except Exception as e:
             logger.error(
-                f"AppSheet {action} batch {i // APPSHEET_BATCH + 1} failed: {e}"
+                f"AppSheet {action} batch {batch_num}/{total_batches} failed: {e}"
             )
+        if batch_num < total_batches:
+            time.sleep(1.0)  # 1s between batches to stay under AppSheet rate limit
     return written
 
 
@@ -437,9 +458,9 @@ def main():
 
         # ── Step 1: Heart <-> Keyword Sync ────────────────────────────────
         if p.favorite:
-            if "Flagged" not in current_keywords:     tags_add.append("Flagged")
+            if "PicSafe Favorited" not in current_keywords:     tags_add.append("PicSafe Favorited")
         else:
-            if "Flagged" in current_keywords:          tags_remove.append("Flagged")
+            if "PicSafe Favorited" in current_keywords:          tags_remove.append("PicSafe Favorited")
 
         # ── Steps 2 & 3: Face Recognition + QA (quality-filtered) ────────
         face_status = get_face_status(p)
@@ -479,12 +500,16 @@ def main():
         for t in tags_remove:
             sim_tags.discard(t)
 
-        # ── Mint PicSafe ID (2+ Star rating) ──────────────────────────────
+        # ── Mint PicSafe ID (2+ Star rating AND Favorite / heart) ────────
+        # Both conditions must be true for a new ID to be assigned:
+        #   • MINTING_RATING_KEYWORDS  →  2 Star | 3 Star | 4 Star | 5 Star
+        #   • p.favorite               →  Favorited ("heart") in Apple Photos
+        # Photos that already have a PicSafe_ title are skipped (idempotent).
         has_mint_rating = not sim_tags.isdisjoint(MINTING_RATING_KEYWORDS)
         current_title   = p.title or ""
         new_title: str  = None
 
-        if has_mint_rating and not current_title.startswith("PicSafe_"):
+        if has_mint_rating and p.favorite and not current_title.startswith("PicSafe_"):
             new_title = get_next_sequence()
             stats["minted"] += 1
 
@@ -553,20 +578,23 @@ def main():
             gps_status      = "OK" if has_gps else "MISSING"
             people_str      = ", ".join(sorted(persons_in_photo))
             kw_str          = ", ".join(sorted(sim_tags))
-            enhancement_str = "ENHANCED" if is_enhanced else "UNENHANCED"
+            # Use title-case values matching AppSheet's stored enum format
+            enhancement_str = "Enhanced" if is_enhanced else "Not Enhanced"
 
             if p.uuid in appsheet_existing:
                 existing = appsheet_existing[p.uuid]
-                row_id   = existing.get("_RowID", "")
+                # AppSheet's row key is "Row ID" (with space), not "_RowID"
+                row_id   = existing.get("Row ID", "")
                 changed  = (
-                    existing.get("face_status")  != face_status
-                    or existing.get("gps_status")    != gps_status
-                    or existing.get("people_list")   != people_str
-                    or existing.get("picsafe_id")    != picsafe_id
+                    existing.get("face_status")        != face_status
+                    or existing.get("gps_status")      != gps_status
+                    or existing.get("people_list")     != people_str
+                    or existing.get("picsafe_id")      != picsafe_id
+                    or existing.get("enhancement_status") != enhancement_str
                 )
                 if changed and row_id:
                     to_update.append({
-                        "_RowID":             row_id,
+                        "Row ID":             row_id,
                         "picsafe_id":         picsafe_id,
                         "face_status":        face_status,
                         "gps_status":         gps_status,

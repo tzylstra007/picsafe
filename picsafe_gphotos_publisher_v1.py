@@ -326,7 +326,7 @@ def export_person(person_name: str) -> tuple[bool, int]:
 
 def get_smartsheet_data(ss_client) -> dict:
     """
-    Returns dict of {person_name: {row_id, go_live, google_photos_link_col_id, ...}}
+    Returns dict of {person_name: {row_id, go_live, smell_adjectives, ...}}
     for all rows in the control sheet.
     """
     sheet = ss_client.Sheets.get_sheet(SMARTSHEET_ID)
@@ -340,29 +340,44 @@ def get_smartsheet_data(ss_client) -> dict:
         if not name:
             continue
         rows[str(name).strip()] = {
-            "row_id":        row.id,
-            "go_live":       bool(cells.get(col_map.get("Go Live"), False)),
-            "col_map":       col_map,
+            "row_id":            row.id,
+            "go_live":           bool(cells.get(col_map.get("Go Live"), False)),
+            "smell_adjectives":  str(cells.get(col_map.get("Smell Adjectives")) or "").strip(),
+            "col_map":           col_map,
         }
     return rows, col_map
 
 
 def update_smartsheet_row(
     ss_client,
-    row_id:       int,
-    col_map:      dict,
-    gphotos_link: str = None,
-    photo_count:  int = None,
-    last_sync:    str = None,
+    row_id:            int,
+    col_map:           dict,
+    gphotos_link:      str  = None,
+    photo_count:       int  = None,
+    video_count:       int  = None,
+    last_album_update: str  = None,
+    dns_redirected:    bool = None,
 ) -> bool:
-    """Update Smartsheet cells for one person's row."""
+    """Update Smartsheet cells for one person's row.
+
+    Column mapping:
+      gphotos_link      → "Google Photos Share Link"
+      photo_count       → "Photos - Google"   (images in Google Photos album)
+      video_count       → "Videos - Google"   (videos in Google Photos album)
+      last_album_update → "Last Album Update" (date of last album change)
+      dns_redirected    → "DNS Redirected"    (True once Netlify redirect is written)
+    """
     cells = []
-    if gphotos_link and "Google Photos Link" in col_map:
-        cells.append({"columnId": col_map["Google Photos Link"], "value": gphotos_link})
+    if gphotos_link and "Google Photos Share Link" in col_map:
+        cells.append({"columnId": col_map["Google Photos Share Link"], "value": gphotos_link})
     if photo_count is not None and "Photos - Google" in col_map:
         cells.append({"columnId": col_map["Photos - Google"], "value": photo_count})
-    if last_sync and "Last Sync" in col_map:
-        cells.append({"columnId": col_map["Last Sync"], "value": last_sync})
+    if video_count is not None and "Videos - Google" in col_map:
+        cells.append({"columnId": col_map["Videos - Google"], "value": video_count})
+    if last_album_update and "Last Album Update" in col_map:
+        cells.append({"columnId": col_map["Last Album Update"], "value": last_album_update})
+    if dns_redirected is not None and "DNS Redirected" in col_map:
+        cells.append({"columnId": col_map["DNS Redirected"], "value": dns_redirected})
 
     if not cells:
         return True
@@ -726,10 +741,12 @@ def main():
         current_picsafe_ids = {picsafe_id_from_filename(f) for f in local_files
                                if os.path.splitext(f)[1].lower() in UPLOAD_EXTS}
 
+        person_pruned = 0
         for pid, mid in existing_in_album.items():
             if pid not in current_picsafe_ids:
                 print(f"      🗑️  Pruning deleted: {pid}")
                 if remove_from_album(session, album_id, mid):
+                    person_pruned += 1
                     pending_log_entries.append(
                         as_db.make_log_entry(pid, "GPHOTOS_REMOVE",
                                              f"Removed from album '{person_name}'", SCRIPT_NAME)
@@ -738,13 +755,31 @@ def main():
         # --- Update Smartsheet ---
         if person_name in ss_rows:
             row_id = ss_rows[person_name]["row_id"]
+
+            # Split local_files into photos vs videos for the dashboard columns.
+            # local_files is already deduplicated (best version per PicSafe ID).
+            gp_photos = sum(1 for f in local_files
+                            if os.path.splitext(f)[1].lower() not in VIDEO_EXTS)
+            gp_videos = sum(1 for f in local_files
+                            if os.path.splitext(f)[1].lower() in VIDEO_EXTS)
+
+            # Set Last Album Update if anything changed in the album this run.
+            album_changed   = person_uploaded > 0 or person_pruned > 0
+            album_date      = sync_time[:10] if album_changed else None  # YYYY-MM-DD
+
+            # DNS Redirected = True when Go Live + Smell Adjective + share link are all set.
+            smell = ss_rows[person_name].get("smell_adjectives", "")
+            dns_ok = bool(share_link and smell)
+
             update_smartsheet_row(
                 ss_client,
-                row_id    = row_id,
-                col_map   = col_map,
-                gphotos_link = share_link,
-                photo_count  = len(person_media_ids),
-                last_sync    = sync_time,
+                row_id            = row_id,
+                col_map           = col_map,
+                gphotos_link      = share_link,
+                photo_count       = gp_photos,
+                video_count       = gp_videos,
+                last_album_update = album_date,
+                dns_redirected    = dns_ok if dns_ok else None,
             )
 
         # --- Update AppSheet album record ---
