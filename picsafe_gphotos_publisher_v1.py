@@ -29,7 +29,6 @@ import os
 import sys
 import time
 import subprocess
-import shutil
 import json
 import requests
 import smartsheet
@@ -51,7 +50,6 @@ try:
     SMARTSHEET_TOKEN     = picsafe_secrets.SMARTSHEET_ACCESS_TOKEN.strip()
     GOOGLE_CREDS_FILE    = picsafe_secrets.GOOGLE_CREDENTIALS_FILE
     GOOGLE_TOKEN_FILE    = picsafe_secrets.GOOGLE_TOKEN_FILE
-    NETLIFY_SITE_ID      = getattr(picsafe_secrets, "NETLIFY_SITE_ID", "").strip()
 except (ImportError, AttributeError) as e:
     print(f"❌ CREDENTIAL ERROR: {e}")
     sys.exit(1)
@@ -67,7 +65,12 @@ VIDEO_SIZE_LIMIT_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB
 
 PUBLIC_ALBUM_TITLE     = "PicSafe Public"
 
-GPHOTOS_SCOPES = ['https://www.googleapis.com/auth/photoslibrary']
+GPHOTOS_SCOPES = [
+    "https://www.googleapis.com/auth/photoslibrary",                         # full read/write incl. batchRemoveMediaItems
+    "https://www.googleapis.com/auth/photoslibrary.appendonly",
+    "https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata",
+    "https://www.googleapis.com/auth/photoslibrary.sharing",
+]
 GPHOTOS_BASE   = "https://photoslibrary.googleapis.com/v1"
 
 # Supported photo/video extensions to upload
@@ -75,9 +78,10 @@ PHOTO_EXTS = {'.jpg', '.jpeg', '.heic', '.png', '.gif', '.tif', '.tiff', '.webp'
 VIDEO_EXTS = {'.mp4', '.mov', '.m4v', '.avi', '.mkv', '.wmv', '.3gp'}
 UPLOAD_EXTS = PHOTO_EXTS | VIDEO_EXTS
 
-# Netlify vanity URL redirects
-NETLIFY_DEPLOY_DIR = os.path.expanduser("~/PicSafe/netlify_deploy")
-NETLIFY_REDIRECTS  = os.path.join(NETLIFY_DEPLOY_DIR, "_redirects")
+# Netlify vanity URL redirects — written in-repo, deployed via git push
+# netlify.toml (repo root) sets publish="." so Netlify serves _redirects from here.
+PICSAFE_REPO_DIR  = os.path.dirname(os.path.abspath(__file__))
+NETLIFY_REDIRECTS = os.path.join(PICSAFE_REPO_DIR, "_redirects")
 
 
 # ---------------------------------------------------------------------------
@@ -395,19 +399,19 @@ def picsafe_id_from_filename(filename: str) -> str:
 
 def sync_netlify_redirects(ss_client) -> int:
     """
-    Build a fresh Netlify _redirects file from Smartsheet and deploy it.
+    Build a fresh Netlify _redirects file from Smartsheet, write it to the
+    PicSafe git repo, and push — Netlify's GitHub integration deploys automatically.
 
     For every row where 'Go Live' is checked, 'Smell Adjectives' is non-empty,
     and 'Google Photos Share Link' is non-empty, write a redirect:
         /<smell_adjective_slug>   <google_photos_share_link>   301
 
     The _redirects file is fully regenerated on every run (idempotent).
-    Returns the count of redirects written (0 if nothing to deploy or NETLIFY_SITE_ID unset).
-    """
-    if not NETLIFY_SITE_ID:
-        print("   ⚠️  NETLIFY_SITE_ID not set — skipping vanity URL sync")
-        return 0
+    Deployment is event-driven: this function fires the git push event; Netlify
+    handles the actual deploy asynchronously via its GitHub integration.
 
+    Returns the count of redirects written.
+    """
     print("\n🌐  NETLIFY VANITY URL SYNC...")
     sheet   = ss_client.Sheets.get_sheet(SMARTSHEET_ID)
     col_map = {c.title: c.id for c in sheet.columns}
@@ -431,7 +435,7 @@ def sync_netlify_redirects(ss_client) -> int:
         print("   ℹ️  No rows qualify for vanity URLs — nothing to deploy")
         return 0
 
-    os.makedirs(NETLIFY_DEPLOY_DIR, exist_ok=True)
+    # Write _redirects to the repo root (netlify.toml sets publish="." so Netlify picks it up)
     with open(NETLIFY_REDIRECTS, "w") as f:
         f.write("# PicSafe vanity URL redirects — auto-generated, do not edit manually\n")
         f.write("# Format: /<slug>   <destination>   <status>\n\n")
@@ -439,27 +443,45 @@ def sync_netlify_redirects(ss_client) -> int:
 
     print(f"   📝 Written {len(redirects)} redirect(s) to {NETLIFY_REDIRECTS}")
 
-    netlify_bin = shutil.which("netlify") or "/usr/local/bin/netlify"
-    cmd = [netlify_bin, "deploy", "--prod",
-           "--dir", NETLIFY_DEPLOY_DIR,
-           "--site", NETLIFY_SITE_ID]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode == 0:
-            print(f"   ✅ Netlify deploy successful! ({len(redirects)} redirect(s) live)")
-            if result.stdout:
-                # Print deploy URL if present in output
-                for line in result.stdout.splitlines():
-                    if "https://" in line:
-                        print(f"      {line.strip()}")
-        else:
-            print(f"   ❌ Netlify deploy failed (exit {result.returncode}):")
-            print(f"      {result.stderr.strip()}")
-    except subprocess.TimeoutExpired:
-        print("   ❌ Netlify deploy timed out after 60s")
-    except Exception as e:
-        print(f"   ❌ Netlify deploy error: {e}")
+    # Clear any stale git lock files before running git commands (can be left
+    # behind if a previous run was interrupted mid-commit).
+    for lock_file in [".git/HEAD.lock", ".git/index.lock"]:
+        lock_path = os.path.join(PICSAFE_REPO_DIR, lock_file)
+        if os.path.exists(lock_path):
+            try:
+                os.remove(lock_path)
+                print(f"   🔓 Removed stale git lock: {lock_file}")
+            except OSError as e:
+                print(f"   ⚠️  Could not remove git lock {lock_file}: {e}")
 
+    # Commit and push — Netlify's GitHub integration deploys on the push event
+    git_steps = [
+        (["git", "-C", PICSAFE_REPO_DIR, "add", "_redirects"],
+         "add"),
+        (["git", "-C", PICSAFE_REPO_DIR, "commit", "-m",
+          f"chore: update {len(redirects)} vanity URL redirect(s) [publisher]"],
+         "commit"),
+        (["git", "-C", PICSAFE_REPO_DIR, "push"],
+         "push"),
+    ]
+
+    for cmd, label in git_steps:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                combined = (result.stdout + result.stderr).lower()
+                if label == "commit" and "nothing to commit" in combined:
+                    print("   ℹ️  _redirects unchanged — no new commit needed")
+                    return len(redirects)
+                print(f"   ⚠️  git {label} failed (exit {result.returncode}): "
+                      f"{(result.stderr or result.stdout).strip()[:200]}")
+                return len(redirects)
+        except subprocess.TimeoutExpired:
+            print(f"   ❌ git {label} timed out after 30s")
+            return len(redirects)
+
+    print(f"   ✅ Pushed _redirects ({len(redirects)} redirect(s)) — "
+          f"Netlify will deploy automatically via GitHub integration.")
     return len(redirects)
 
 
@@ -508,11 +530,12 @@ def main():
     pending_log_entries:   list = []
 
     total_stats = {
-        "uploaded":      0,
-        "skipped_size":  0,
-        "already_synced":0,
-        "public_added":  0,
-        "errors":        0,
+        "uploaded":         0,
+        "skipped_size":     0,
+        "already_synced":   0,
+        "public_added":     0,
+        "errors":           0,
+        "refresh_uploads":  0,   # edited versions uploaded alongside their original
     }
 
     sync_time = as_db.now_ts()
@@ -560,6 +583,20 @@ def main():
             f for f in os.listdir(person_dir)
             if os.path.splitext(f)[1].lower() in UPLOAD_EXTS
         ]
+
+        # Deduplicate: prefer the edited version over the original for each photo.
+        # osxphotos exports both PicSafe_XXXXXX.jpg AND PicSafe_XXXXXX_edited.jpeg
+        # when a photo has been edited in Apple Photos. We only want one copy in
+        # Google Photos — the edited version wins; original is the fallback.
+        _best: dict = {}  # base_id → filename
+        for _fname in local_files:
+            _stem = os.path.splitext(_fname)[0]           # e.g. "PicSafe_012640_edited"
+            _base = _stem.replace("_edited", "")           # e.g. "PicSafe_012640"
+            _is_edited = "_edited" in _stem
+            if _base not in _best or _is_edited:
+                _best[_base] = _fname
+        local_files = list(_best.values())
+
         person_media_ids = dict(existing_in_album)  # We'll add to this as we upload
 
         person_uploaded    = 0
@@ -576,6 +613,19 @@ def main():
             if picsafe_id in existing_in_album:
                 total_stats["already_synced"] += 1
                 continue
+
+            # Detect "refresh" case: an _edited version is being uploaded but the
+            # original (base) is already in the album.  We CANNOT remove the original
+            # via batchRemoveMediaItems (blocked for unverified OAuth apps), so both
+            # versions will coexist in the album.  Log a warning so the user knows
+            # manual cleanup is needed in the Google Photos UI.
+            _base_id   = picsafe_id.replace("_edited", "")
+            _is_refresh = "_edited" in picsafe_id and _base_id in existing_in_album
+            if _is_refresh:
+                print(f"      🔄  REFRESH: uploading {picsafe_id} (enhanced version).")
+                print(f"          ⚠️  Original {_base_id} already in album — manual removal")
+                print(f"              needed in Google Photos UI (API removal blocked).")
+                total_stats["refresh_uploads"] += 1
 
             # Video size check
             file_size = os.path.getsize(fpath)
@@ -623,7 +673,7 @@ def main():
             total_stats["uploaded"]      += 1
             pending_asset_updates.append({
                 "picsafe_id":        picsafe_id,
-                "status_gphotos":    "UPLOADED",
+                "status_gphotos":    "DONE",
                 "gphotos_media_id":  media_id,
                 "gphotos_album_id":  album_id,
                 "last_upload_date":  sync_time,
@@ -713,7 +763,7 @@ def main():
     # Flush all AppSheet updates
     # -----------------------------------------------------------------------
     print(f"   📤 Flushing {len(pending_asset_updates)} asset status updates to AppSheet...")
-    as_db.batch_write("assets", "Edit", pending_asset_updates)
+    as_db.upsert_assets(pending_asset_updates)  # upsert_assets handles Row ID lookup
 
     print(f"   📤 Flushing {len(pending_log_entries)} log entries to AppSheet...")
     as_db.add_audit_log(pending_log_entries)
@@ -727,6 +777,8 @@ def main():
     # Run summary
     # -----------------------------------------------------------------------
     elapsed = time.time() - start_time
+    refresh_count = total_stats.get("refresh_uploads", 0)
+    refresh_note  = f" Refresh uploads (manual cleanup needed): {refresh_count}." if refresh_count else ""
     summary = (
         f"Publisher complete in {elapsed:.0f}s. "
         f"Uploaded: {total_stats['uploaded']}. "
@@ -734,6 +786,7 @@ def main():
         f"Public album additions: {total_stats['public_added']}. "
         f"Skipped oversized: {total_stats['skipped_size']}. "
         f"Errors: {total_stats['errors']}."
+        f"{refresh_note}"
     )
     status = "FAILED" if total_stats["errors"] > total_stats["uploaded"] else (
              "PARTIAL" if total_stats["errors"] > 0 else "SUCCESS")

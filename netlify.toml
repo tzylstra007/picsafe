@@ -1,0 +1,6 @@
+# PicSafe Netlify configuration
+# publish = "." means Netlify serves the repo root, picking up _redirects automatically.
+# This file overrides any dashboard publish-directory setting.
+
+[build]
+  publish = "."
