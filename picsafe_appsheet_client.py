@@ -38,6 +38,8 @@ def _action(table: str, action: str, rows: list) -> dict:
     Low-level AppSheet REST API call.
     action: "Add" | "Edit" | "Delete" | "Find"
     Raises requests.HTTPError on non-2xx responses.
+    Returns {} if the response body is empty (AppSheet sometimes returns 200 OK
+    with no body on successful Edit/Add operations).
     """
     url = f"{BASE_URL}/{table}/Action"
     payload = {
@@ -47,6 +49,8 @@ def _action(table: str, action: str, rows: list) -> dict:
     }
     resp = requests.post(url, headers=HEADERS, json=payload, timeout=30)
     resp.raise_for_status()
+    if not resp.content or not resp.content.strip():
+        return {}
     return resp.json()
 
 
@@ -83,12 +87,68 @@ def batch_write(table: str, action: str, rows: list) -> int:
 # Table-specific helpers
 # ---------------------------------------------------------------------------
 
+def _fetch_row_ids(picsafe_ids: list) -> dict:
+    """
+    Look up AppSheet 'Row ID' values for a list of picsafe_ids.
+    Returns {picsafe_id: row_id}.  Missing rows are omitted.
+
+    AppSheet's row key is the auto-generated 'Row ID' column, NOT picsafe_id,
+    so Edit operations must include 'Row ID' in each row dict.
+    """
+    result = {}
+    for pid in picsafe_ids:
+        try:
+            data = requests.post(
+                f"{BASE_URL}/assets/Action",
+                headers=HEADERS,
+                json={
+                    "Action": "Find",
+                    "Properties": {
+                        "Locale": "en-US",
+                        "Selector": f'Filter(assets, [picsafe_id] = "{pid}")',
+                    },
+                    "Rows": [],
+                },
+                timeout=30,
+            )
+            data.raise_for_status()
+            if data.content and data.content.strip():
+                rows = data.json()
+                if rows and isinstance(rows, list):
+                    # AppSheet returns the key as "Row ID" (with space)
+                    result[pid] = rows[0].get("Row ID", "")
+        except Exception:
+            pass
+    return result
+
+
 def upsert_assets(asset_rows: list) -> int:
     """
-    Edit (upsert) asset rows. AppSheet's Edit action updates matching rows
-    by key (picsafe_id). Use add_assets() for guaranteed first-time inserts.
+    Edit asset rows in AppSheet, populating 'Row ID' for each row first.
+    AppSheet requires the row key ('Row ID') for Edit operations; rows that
+    cannot be resolved are skipped with a warning.
     """
-    return batch_write("assets", "Edit", asset_rows)
+    if not asset_rows:
+        return 0
+
+    # Extract the base picsafe_id (strip _edited suffix if present) for lookup
+    base_ids = [r["picsafe_id"].replace("_edited", "") for r in asset_rows]
+    row_id_map = _fetch_row_ids(list(set(base_ids)))
+
+    enriched = []
+    for row in asset_rows:
+        base = row["picsafe_id"].replace("_edited", "")
+        rid = row_id_map.get(base, "")
+        if not rid:
+            print(f"   ⚠️  upsert_assets: no Row ID found for {row['picsafe_id']}, skipping")
+            continue
+        # Use base picsafe_id (strip _edited) so we never overwrite the AppSheet
+        # picsafe_id field with the "_edited" filename variant.
+        enriched.append({**row, "picsafe_id": base, "Row ID": rid})
+
+    if not enriched:
+        return 0
+    return batch_write("assets", "Edit", enriched)
 
 
 def add_assets(asset_rows: list) -> int:
@@ -225,9 +285,12 @@ def make_run_row(
     summary:         str = "",
 ) -> dict:
     """Build a well-formed run_history row dict."""
+    now = datetime.datetime.utcnow()
+    run_id = now.strftime("run_%Y%m%d_%H%M%S_") + f"{now.microsecond:06d}"
     return {
+        "run_id":          run_id,
         "script_name":     script_name,
-        "run_date":        now_ts(),
+        "run_date":        now.strftime("%Y-%m-%d %H:%M:%S"),
         "photos_scanned":  photos_scanned,
         "photos_modified": photos_modified,
         "photos_uploaded": photos_uploaded,

@@ -90,7 +90,9 @@ if not _TOKEN_FILE or not Path(_TOKEN_FILE).exists():
 
 # Google Photos OAuth scopes — must match what was granted during initial auth
 SCOPES = [
-    "https://www.googleapis.com/auth/photoslibrary",
+    "https://www.googleapis.com/auth/photoslibrary",                         # full read/write (batchRemoveMediaItems blocked for unverified apps)
+    "https://www.googleapis.com/auth/photoslibrary.appendonly",
+    "https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata",
     "https://www.googleapis.com/auth/photoslibrary.sharing",
 ]
 
@@ -99,9 +101,10 @@ PHOTOS_BASE   = "https://photoslibrary.googleapis.com/v1"
 UPLOAD_URL    = "https://photos.googleapis.com/v1/uploads"
 
 # Pagination / batch limits
-PAGE_SIZE     = 50
-MAX_PAGE_SIZE = 100   # Google Photos Library API maximum
-BATCH_LIMIT   = 50   # batchAddMediaItems / batchRemoveMediaItems maximum
+PAGE_SIZE          = 50
+MAX_PAGE_SIZE      = 50    # Google Photos albums.list maximum (50)
+MAX_MEDIA_PAGE_SIZE = 100  # mediaItems:search maximum (100)
+BATCH_LIMIT        = 50   # batchAddMediaItems / batchRemoveMediaItems maximum
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +216,7 @@ async def _collect_all_album_media(album_id: str) -> list:
     page_token = None
 
     while True:
-        body: dict = {"albumId": album_id, "pageSize": MAX_PAGE_SIZE}
+        body: dict = {"albumId": album_id, "pageSize": MAX_MEDIA_PAGE_SIZE}
         if page_token:
             body["pageToken"] = page_token
 
@@ -266,7 +269,7 @@ async def picsafe_gphotos_list_albums(
         page_token = None
 
         while True:
-            params: dict = {"pageSize": MAX_PAGE_SIZE}
+            params: dict = {"pageSize": MAX_PAGE_SIZE}  # albums.list max = 50
             if page_token:
                 params["pageToken"] = page_token
 
@@ -763,7 +766,10 @@ async def picsafe_gphotos_add_to_album(
         "Remove one or more media items from a Google Photos album. "
         "Pass media_item_ids as a JSON array (max 50 per call). "
         "This ONLY removes items from the album — it does NOT delete them from the library. "
-        "Use when pruning photos that no longer meet the 'PicSafe Ready' criteria."
+        "Use when pruning photos that no longer meet the 'PicSafe Ready' criteria. "
+        "NOTE: batchRemoveMediaItems returns 403 PERMISSION_DENIED for unverified OAuth apps "
+        "regardless of granted scopes. This tool is included for completeness but will not "
+        "function until the Google Photos API app is verified by Google."
     ),
     annotations={
         "readOnlyHint":   False,
@@ -806,6 +812,51 @@ async def picsafe_gphotos_remove_from_album(
             indent=2,
         )
 
+    except httpx.HTTPStatusError as e:
+        return _err(f"Google Photos API error {e.response.status_code}: {e.response.text[:300]}")
+    except Exception as e:
+        return _err(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Tool: picsafe_gphotos_get_media_item
+# ---------------------------------------------------------------------------
+
+@mcp.tool(
+    name="picsafe_gphotos_get_media_item",
+    description=(
+        "Get a single Google Photos media item by its ID. "
+        "Returns id, description (= picsafe_id), filename, mediaMetadata "
+        "(width/height/creationTime/photo or video details), and productUrl. "
+        "Use to verify what picsafe_id is stored in a media item's description, "
+        "or to retrieve metadata before adding an item to an album."
+    ),
+    annotations={
+        "readOnlyHint":   True,
+        "destructiveHint": False,
+        "idempotentHint":  True,
+        "openWorldHint":   False,
+    },
+)
+async def picsafe_gphotos_get_media_item(media_item_id: str) -> str:
+    """
+    Args:
+        media_item_id:  Google Photos media item ID (from list_album_media or upload_photo).
+    Returns:
+        JSON with media item details or an error envelope.
+    """
+    try:
+        item = await _get(f"mediaItems/{media_item_id}")
+        return json.dumps(
+            {
+                "id":            item.get("id"),
+                "description":   item.get("description"),
+                "filename":      item.get("filename"),
+                "mediaMetadata": item.get("mediaMetadata"),
+                "productUrl":    item.get("productUrl"),
+            },
+            indent=2,
+        )
     except httpx.HTTPStatusError as e:
         return _err(f"Google Photos API error {e.response.status_code}: {e.response.text[:300]}")
     except Exception as e:
