@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <!-- Identity -->
+    <key>Label</key>
+    <string>com.picsafe.nightly</string>
+
+    <!-- Script to run: nightly pipeline orchestrator -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/tomz/PicSafe/picsafe_nightly.sh</string>
+    </array>
+
+    <!-- Run every night at 11:00 PM local time -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Redirect stdout/stderr to the log directory.
+         picsafe_nightly.sh also writes its own timestamped log,
+         but launchd captures anything that escapes the script. -->
+    <key>StandardOutPath</key>
+    <string>/Users/tomz/PicSafe/logs/launchd_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/tomz/PicSafe/logs/launchd_stderr.log</string>
+
+    <!-- Run even if the Mac was asleep at 11 PM — fire on next wake.
+         (Only if the missed window is within the same calendar day.) -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Keep the agent loaded at login -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <!-- Use a login environment so PATH, HOME, etc. are set correctly -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/tomz</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+</dict>
+</plist>
