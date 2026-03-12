@@ -3,6 +3,8 @@ picsafe_secrets.py
 *.key
 *.token
 flickrkeys.txt
+# SSH deploy key — private key must NEVER be committed
+.ssh_deploy/id_picsafe
 
 # ── PYTHON ────────────────────────────────────────────────────────────────────
 __pycache__/
