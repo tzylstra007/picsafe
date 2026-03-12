@@ -343,6 +343,7 @@ def get_smartsheet_data(ss_client) -> dict:
             "row_id":            row.id,
             "go_live":           bool(cells.get(col_map.get("Go Live"), False)),
             "smell_adjectives":  str(cells.get(col_map.get("Smell Adjectives")) or "").strip(),
+            "gphotos_share_link": str(cells.get(col_map.get("Google Photos Share Link")) or "").strip(),
             "col_map":           col_map,
         }
     return rows, col_map
@@ -768,8 +769,12 @@ def main():
             album_date      = sync_time[:10] if album_changed else None  # YYYY-MM-DD
 
             # DNS Redirected = True when Go Live + Smell Adjective + share link are all set.
+            # share_link comes from the Google Photos API (may be "" if albums:share API is blocked).
+            # Fall back to the value already stored in Smartsheet so the checkbox is set correctly
+            # even when the runtime API call fails (403 for unverified apps).
             smell = ss_rows[person_name].get("smell_adjectives", "")
-            dns_ok = bool(share_link and smell)
+            stored_link = ss_rows[person_name].get("gphotos_share_link", "")
+            dns_ok = bool((share_link or stored_link) and smell)
 
             update_smartsheet_row(
                 ss_client,
