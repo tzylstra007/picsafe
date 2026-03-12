@@ -123,6 +123,43 @@ def _fetch_all_row_ids() -> dict:
     return {}
 
 
+def fetch_public_assets() -> list:
+    """
+    Return list of {picsafe_id, gphotos_media_id} for all assets where is_public='Yes'.
+    gphotos_media_id may be empty for assets not yet uploaded to Google Photos.
+
+    Used by the publisher AFTER flushing pending_asset_updates so that AppSheet
+    has current gphotos_media_ids — avoids needing to merge in-memory state.
+    Returns [] on failure (logs warning).
+    """
+    try:
+        data = requests.post(
+            f"{BASE_URL}/assets/Action",
+            headers=HEADERS,
+            json={
+                "Action": "Find",
+                "Properties": {"Locale": "en-US"},
+                "Rows": [],
+            },
+            timeout=120,
+        )
+        data.raise_for_status()
+        if data.content and data.content.strip():
+            rows = data.json()
+            if rows and isinstance(rows, list):
+                return [
+                    {
+                        "picsafe_id":       r["picsafe_id"],
+                        "gphotos_media_id": r.get("gphotos_media_id", ""),
+                    }
+                    for r in rows
+                    if r.get("is_public") == "Yes" and r.get("picsafe_id")
+                ]
+    except Exception as e:
+        print(f"   ⚠️  fetch_public_assets failed: {e}")
+    return []
+
+
 def upsert_assets(asset_rows: list) -> int:
     """
     Edit asset rows in AppSheet, populating 'Row ID' for each row first.

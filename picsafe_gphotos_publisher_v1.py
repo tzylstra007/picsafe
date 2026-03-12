@@ -560,6 +560,11 @@ def main():
     # Per-person loop
     # -----------------------------------------------------------------------
     for person_name in go_live_people:
+        # "Public" is a keyword sentinel, not a real face — skip the per-person loop
+        # entirely. It is handled by the dedicated public album sync after the main loop.
+        if person_name == "Public":
+            continue
+
         print(f"👤  Processing: {person_name}")
 
         # --- Local export ---
@@ -701,40 +706,8 @@ def main():
 
             time.sleep(0.1)  # Gentle rate limiting
 
-        # --- "PicSafe Public" album: check for public-eligible photos ---
-        # Re-scan local export dir for files tagged PicSafe Public (no named faces)
-        # We rely on osxphotos having exported these files because we use keywords
-        # to filter. Public eligibility = PicSafe Public keyword AND facesfree.
-        # The bridge already ensures facesfree photos in the export have been tagged.
-        #
-        # Practical approach: check AppSheet assets where is_public=Yes AND person
-        # maps to this person's export folder → add to public album if not there.
-        #
-        # For simplicity in v1, we check for any file in the export that has
-        # "facesfree" in its AppSheet record (is_public = Yes). We query AppSheet
-        # by scanning the pending_asset_updates we just built.
-
-        # Get existing items in public album
-        existing_in_public = get_album_media_ids(session, public_album_id)
-
-        for picsafe_id, media_id in person_media_ids.items():
-            # Find whether this was marked is_public=Yes by the bridge
-            # Check our pending updates first (most recent), then look at AppSheet
-            is_public = False
-            for upd in pending_asset_updates:
-                if upd.get("picsafe_id") == picsafe_id:
-                    is_public = upd.get("is_public") == "Yes"
-                    break
-
-            if is_public and picsafe_id not in existing_in_public:
-                print(f"      🌍 Adding to Public album: {picsafe_id}")
-                if add_to_album(session, public_album_id, media_id):
-                    total_stats["public_added"] += 1
-                    existing_in_public[picsafe_id] = media_id
-                    pending_log_entries.append(
-                        as_db.make_log_entry(picsafe_id, "GPHOTOS_PUBLIC_ADD",
-                                             "Added to PicSafe Public album", SCRIPT_NAME)
-                    )
+        # Note: "PicSafe Public" album sync is handled after the main loop (see below)
+        # to correctly cover BOTH newly-uploaded and already-uploaded public photos.
 
         # --- Prune deleted photos from album ---
         # Files removed by osxphotos --cleanup are no longer in person_dir.
@@ -807,6 +780,71 @@ def main():
 
     print(f"   📤 Flushing {len(pending_log_entries)} log entries to AppSheet...")
     as_db.add_audit_log(pending_log_entries)
+
+    # -----------------------------------------------------------------------
+    # PicSafe Public album sync
+    # Runs AFTER flushing so AppSheet has current gphotos_media_ids for all
+    # photos uploaded this run. This covers:
+    #   - Photos uploaded tonight (gphotos_media_id just written to AppSheet)
+    #   - Photos uploaded in previous runs (gphotos_media_id already in AppSheet)
+    # -----------------------------------------------------------------------
+    print("\n🌍  PICSAFE PUBLIC ALBUM SYNC...")
+    public_log_entries: list = []
+
+    # Fetch all is_public=Yes assets from AppSheet (bridge sets this field)
+    public_assets = as_db.fetch_public_assets()
+    print(f"   📊 AppSheet reports {len(public_assets)} public assets.")
+
+    # Build candidate dict: only include those with a gphotos_media_id (uploaded)
+    public_candidates = {
+        a["picsafe_id"]: a["gphotos_media_id"]
+        for a in public_assets
+        if a["gphotos_media_id"]
+    }
+    print(f"   📊 {len(public_candidates)} public assets have a Google Photos media ID.")
+
+    # Get what's already in the PicSafe Public album
+    existing_in_public = get_album_media_ids(session, public_album_id)
+    print(f"   📊 {len(existing_in_public)} items already in '{PUBLIC_ALBUM_TITLE}' album.")
+
+    # Add any candidates not yet in the album
+    public_added_this_run = 0
+    for picsafe_id, media_id in public_candidates.items():
+        if picsafe_id not in existing_in_public:
+            print(f"   🌍 Adding to Public album: {picsafe_id}")
+            if add_to_album(session, public_album_id, media_id):
+                total_stats["public_added"] += 1
+                public_added_this_run       += 1
+                existing_in_public[picsafe_id] = media_id
+                public_log_entries.append(
+                    as_db.make_log_entry(picsafe_id, "GPHOTOS_PUBLIC_ADD",
+                                         "Added to PicSafe Public album", SCRIPT_NAME)
+                )
+
+    print(f"   ✅ Public album sync: {public_added_this_run} added, "
+          f"{len(existing_in_public)} total in album.")
+
+    # Update "Public" Smartsheet row
+    if "Public" in ss_rows:
+        public_row_id    = ss_rows["Public"]["row_id"]
+        public_total     = len(existing_in_public)
+        album_changed    = public_added_this_run > 0
+        public_date      = sync_time[:10] if album_changed else None
+        update_smartsheet_row(
+            ss_client,
+            row_id            = public_row_id,
+            col_map           = col_map,
+            photo_count       = public_total,
+            video_count       = 0,
+            last_album_update = public_date,
+        )
+        print(f"   ✅ Smartsheet 'Public' row updated: {public_total} total.")
+    else:
+        print("   ⚠️  'Public' row not found in Smartsheet — skipping row update.")
+
+    # Flush public album log entries
+    if public_log_entries:
+        as_db.add_audit_log(public_log_entries)
 
     # -----------------------------------------------------------------------
     # Netlify vanity URL sync
