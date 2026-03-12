@@ -6,7 +6,8 @@ PicSafe bridges the gap between Apple's Photos app and Google Photos by:
 - Scanning your library nightly with [osxphotos](https://github.com/RhetTbull/osxphotos)
 - Auditing each photo for faces, GPS, and enhancement status
 - Minting unique PicSafe IDs for shareable photos
-- Exporting ready photos and uploading them to personal Google Photos albums
+- Uploading ready photos to personal Google Photos albums
+- Writing Netlify vanity redirect URLs (e.g. `picsafe.net/daffodil`) for each Go Live person
 - Tracking everything in AppSheet + Smartsheet for visibility
 
 ---
@@ -19,21 +20,46 @@ Apple Photos Library
         ▼
 ┌─────────────────────────────┐
 │  picsafe_bridge_v2_appsheet │  ← Phase 1: Scan + audit + mint IDs
-│         (7-Step Pipeline)   │    Creates PENDING records in AppSheet
+│       (7-Step Pipeline)     │    Creates/updates records in AppSheet
+│                             │    Updates "Photos - AP" / "Videos - AP"
+│                             │    in Smartsheet dashboard
 └─────────────┬───────────────┘
               │
               ▼
 ┌─────────────────────────────┐
-│    picsafe_export_v2        │  ← Phase 2: Export JPEG/MP4 by UUID
-│                             │    Files → /Volumes/SharkTerra/zData/PicSafe_Exported/
+│  picsafe_gphotos_publisher  │  ← Phase 2: Upload + album management
+│                             │    AppSheet PENDING → Google Photos
+│                             │    Writes Netlify _redirects vanity URLs
+│                             │    Updates Smartsheet dashboard:
+│                             │      Photos/Videos - Google
+│                             │      Google Photos Share Link
+│                             │      Last Album Update
+│                             │      DNS Redirected
 └─────────────┬───────────────┘
               │
               ▼
 ┌─────────────────────────────┐
-│  Google Photos Publisher    │  ← Phase 3: Upload + album management
-│   (Claude nightly task)     │    Updates AppSheet + Smartsheet
+│    picsafe_git_sync.sh      │  ← Phase 3: Commit + push _redirects
+│                             │    Deploys vanity URL changes to Netlify
 └─────────────────────────────┘
 ```
+
+### Nightly Automation
+
+The full pipeline runs automatically each night via macOS launchd:
+
+| Time | What | Where |
+|------|------|--------|
+| 11:00 PM | `picsafe_nightly.sh` (bridge → publisher → git sync) | Mac (launchd) |
+| 7:00 AM | Morning health check: run history + asset stats + dashboard review | Claude scheduled task |
+
+The launchd plist is at `com.picsafe.nightly.plist`. Install with:
+```bash
+cp com.picsafe.nightly.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.picsafe.nightly.plist
+```
+
+Logs go to `~/PicSafe/logs/nightly_YYYY-MM-DD.log`.
 
 ---
 
@@ -51,7 +77,7 @@ Each photo in Apple Photos passes through:
 
 ### PicSafe Ready Criteria
 
-A photo is considered **PicSafe Ready** (eligible for export and upload) when:
+A photo is considered **PicSafe Ready** (eligible for upload) when:
 - ✅ 3 Star or higher rating
 - ✅ At least one "Go Live" person is tagged
 - ✅ No blocker tags (`facesmissing`, `!Audit: Missing GPS`, `!Audit: Not Enhanced`)
@@ -71,22 +97,24 @@ PicSafe uses osxphotos' face quality score to filter out blurry or background fa
 - An **AppSheet** account with the PicSafe app
 - A **Smartsheet** account with the PicSafe dashboard sheet
 - **Google Photos API** credentials (OAuth 2.0)
+- A **Netlify** site connected to this repo (for vanity redirect URLs)
 
 ### Required Smartsheet Dashboard Columns
 
 The bridge and publisher expect these columns in your Smartsheet dashboard (sheet ID configurable in the scripts):
 
-| Column | Type | Purpose |
-|--------|------|---------|
-| Person Name | TEXT_NUMBER (primary) | Apple Photos person name |
-| Go Live | CHECKBOX | Enables upload for this person |
-| Photos - AP | TEXT_NUMBER | Total photos in Apple Photos |
-| Videos - AP | TEXT_NUMBER | Total videos in Apple Photos |
-| Photos - PicSafe Ready | TEXT_NUMBER | Photos meeting Ready criteria |
-| Videos - PicSafe Ready | TEXT_NUMBER | Videos meeting Ready criteria |
-| Photos - Google | TEXT_NUMBER | Photos uploaded to Google Photos |
-| Videos - Google | TEXT_NUMBER | Videos uploaded to Google Photos |
-| Google Photos Link | TEXT_NUMBER | Shareable album URL |
+| Column | Type | Written by | Purpose |
+|--------|------|-----------|---------|
+| Person Name | TEXT_NUMBER (primary) | — | Apple Photos person name |
+| Go Live | CHECKBOX | Manual | Enables upload for this person |
+| Smell Adjectives | TEXT_NUMBER | Manual | Vanity URL slug (e.g. `daffodil`) |
+| Photos - AP | TEXT_NUMBER | Bridge | PicSafe Ready photo count in Apple Photos |
+| Videos - AP | TEXT_NUMBER | Bridge | PicSafe Ready video count in Apple Photos |
+| Photos - Google | TEXT_NUMBER | Publisher | Photos in Google Photos album |
+| Videos - Google | TEXT_NUMBER | Publisher | Videos in Google Photos album |
+| Google Photos Share Link | TEXT_NUMBER | Publisher | Shareable album URL |
+| Last Album Update | DATE | Publisher | Date of last upload or prune |
+| DNS Redirected | CHECKBOX | Publisher | True when vanity URL is live |
 
 ---
 
@@ -94,8 +122,8 @@ The bridge and publisher expect these columns in your Smartsheet dashboard (shee
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/tzylstra/picsafe-v2.git
-cd picsafe-v2
+git clone https://github.com/tzylstra007/picsafe.git
+cd picsafe
 
 # 2. Create and activate virtual environment
 python3 -m venv venv
@@ -110,6 +138,10 @@ cp picsafe_secrets_template.py picsafe_secrets.py
 
 # 5. Grant Full Disk Access to Terminal.app
 # System Settings → Privacy & Security → Full Disk Access → add Terminal
+
+# 6. Install nightly launchd job
+cp com.picsafe.nightly.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.picsafe.nightly.plist
 ```
 
 ---
@@ -127,10 +159,10 @@ MINTING_RATING_KEYWORDS = {"2 Star", "3 Star", "4 Star", "5 Star"}
 READY_RATING_KEYWORDS   = {"3 Star", "4 Star", "5 Star"}
 ```
 
-**picsafe_export_v2.py**
+**picsafe_gphotos_publisher_v1.py**
 ```python
-EXPORT_PATH  = "/Volumes/SharkTerra/zData/PicSafe_Exported"
-LIBRARY_PATH = "/Volumes/SharkTerra/zData/Photos Library.photoslibrary"
+DASHBOARD_SHEET_ID = 8077434218827652   # Smartsheet sheet ID
+PICSAFE_REPO_DIR   = os.path.dirname(os.path.abspath(__file__))
 ```
 
 ---
@@ -143,19 +175,23 @@ LIBRARY_PATH = "/Volumes/SharkTerra/zData/Photos Library.photoslibrary"
 cd ~/PicSafe
 source venv/bin/activate
 
-# Phase 1: Scan Apple Photos and sync to AppSheet
+# Full nightly pipeline (bridge → publisher → git sync)
+bash picsafe_nightly.sh
+
+# Or run individual phases:
 python picsafe_bridge_v2_appsheet.py
-
-# Phase 2: Export ready photos to local disk
-./picsafe_export_v2.sh
-
-# Or with dry-run to preview without writing:
-./picsafe_export_v2.sh --dry-run
+python picsafe_gphotos_publisher_v1.py
+bash picsafe_git_sync.sh
 ```
 
-### Nightly automation
+### Makefile shortcuts
 
-The pipeline runs automatically each night via a Claude scheduled task at 9 PM Pacific, which orchestrates all four phases (bridge → export → Google Photos upload → summary report).
+```bash
+make bridge    # Run bridge only
+make publish   # Run publisher only
+make check     # Health check
+make help      # List all targets
+```
 
 ---
 
@@ -172,9 +208,9 @@ The `assets` table tracks every PicSafe-managed photo:
 | keywords | Comma-separated keywords |
 | face_status | `facesfree` / `facesmissing` / `facescomplete` |
 | gps_status | `OK` / `MISSING` |
-| enhancement_status | `ENHANCED` / `UNENHANCED` |
-| status_export | `PENDING` / `DONE` / `FAILED` |
-| status_gphotos | `PENDING` / `DONE` / `FAILED` / `SKIPPED_SIZE` |
+| enhancement_status | `Enhanced` / `Not Enhanced` |
+| status_export | `Pending` / `Done` / `Failed` |
+| status_gphotos | `Pending` / `Done` / `Failed` / `Skipped Size` |
 | is_public | `Yes` / `No` |
 | last_audit_date | ISO date of last bridge scan |
 | last_export_date | ISO date of last file export |
@@ -182,38 +218,40 @@ The `assets` table tracks every PicSafe-managed photo:
 
 ---
 
-## Files
+## Netlify Vanity URLs
+
+The publisher writes a `_redirects` file (Netlify format) in the repo root when a Go Live person has a `Smell Adjectives` slug and a Google Photos share link. `netlify.toml` sets `publish = "."` so Netlify serves the repo root directly.
+
+Example redirect:
+```
+/daffodil  https://photos.google.com/share/...  302
+```
+
+The `DNS Redirected` checkbox in Smartsheet is set to `true` once the redirect is live.
+
+---
+
+## Core Files
 
 | File | Purpose |
 |------|---------|
 | `picsafe_bridge_v2_appsheet.py` | Phase 1: Apple Photos scanner and AppSheet sync |
-| `picsafe_export_v2.py` | Phase 2: Export PENDING assets to UUID-named files |
-| `picsafe_export_v2.sh` | Shell wrapper for the export script |
+| `picsafe_gphotos_publisher_v1.py` | Phase 2: Google Photos upload and album management |
+| `picsafe_nightly.sh` | Orchestrator: runs bridge → publisher → git sync |
+| `com.picsafe.nightly.plist` | macOS launchd plist for 11 PM nightly execution |
+| `picsafe_git_sync.sh` | Commits and pushes tracked file changes (e.g. `_redirects`) |
 | `picsafe_appsheet_client.py` | Reusable AppSheet REST API client |
 | `picsafe_secrets_template.py` | Credentials template (copy to `picsafe_secrets.py`) |
+| `netlify.toml` | Sets Netlify publish directory to repo root |
+| `_redirects` | Netlify vanity URL redirects (auto-updated by publisher) |
+| `Makefile` | Convenience shortcuts: `make bridge`, `make publish`, etc. |
 | `requirements.txt` | Python dependencies |
-
----
-
-## Contributing
-
-PRs welcome! Key areas for community contribution:
-- Support for additional cloud photo platforms
-- Alternative face quality scoring approaches
-- Cross-platform export (Windows/Linux with different photo libraries)
-- Automated testing / dry-run CI
-
----
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
 ## Acknowledgements
 
 - [osxphotos](https://github.com/RhetTbull/osxphotos) by RhetTbull — the incredible library that makes Apple Photos scriptable
-- [ExifTool](https://exiftool.org) by Phil Harvey — bakes metadata (keywords, faces, GPS) into exported files before Google Photos upload
 - [AppSheet](https://about.appsheet.com) — no-code database backend
 - [Smartsheet](https://www.smartsheet.com) — dashboard and reporting
+- [Netlify](https://netlify.com) — hosts the vanity redirect layer
