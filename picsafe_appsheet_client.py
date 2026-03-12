@@ -87,39 +87,40 @@ def batch_write(table: str, action: str, rows: list) -> int:
 # Table-specific helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_row_ids(picsafe_ids: list) -> dict:
+def _fetch_all_row_ids() -> dict:
     """
-    Look up AppSheet 'Row ID' values for a list of picsafe_ids.
-    Returns {picsafe_id: row_id}.  Missing rows are omitted.
+    Fetch {picsafe_id: row_id} for the ENTIRE assets table in a single API call.
+    Returns {} on failure (logs warning).
 
-    AppSheet's row key is the auto-generated 'Row ID' column, NOT picsafe_id,
-    so Edit operations must include 'Row ID' in each row dict.
+    Replaces the old per-row _fetch_row_ids approach which made one API call
+    per picsafe_id, hit AppSheet rate limits after ~423 calls, and silently
+    dropped the rest — causing is_public and other field updates to never land.
+    AppSheet returns all rows in one Find call with no Selector (confirmed with
+    33,541 row datasets).
     """
-    result = {}
-    for pid in picsafe_ids:
-        try:
-            data = requests.post(
-                f"{BASE_URL}/assets/Action",
-                headers=HEADERS,
-                json={
-                    "Action": "Find",
-                    "Properties": {
-                        "Locale": "en-US",
-                        "Selector": f'Filter(assets, [picsafe_id] = "{pid}")',
-                    },
-                    "Rows": [],
-                },
-                timeout=30,
-            )
-            data.raise_for_status()
-            if data.content and data.content.strip():
-                rows = data.json()
-                if rows and isinstance(rows, list):
-                    # AppSheet returns the key as "Row ID" (with space)
-                    result[pid] = rows[0].get("Row ID", "")
-        except Exception:
-            pass
-    return result
+    try:
+        data = requests.post(
+            f"{BASE_URL}/assets/Action",
+            headers=HEADERS,
+            json={
+                "Action": "Find",
+                "Properties": {"Locale": "en-US"},
+                "Rows": [],
+            },
+            timeout=120,
+        )
+        data.raise_for_status()
+        if data.content and data.content.strip():
+            rows = data.json()
+            if rows and isinstance(rows, list):
+                return {
+                    r["picsafe_id"]: r["Row ID"]
+                    for r in rows
+                    if r.get("picsafe_id") and r.get("Row ID")
+                }
+    except Exception as e:
+        print(f"   ⚠️  _fetch_all_row_ids failed: {e}")
+    return {}
 
 
 def upsert_assets(asset_rows: list) -> int:
@@ -127,13 +128,15 @@ def upsert_assets(asset_rows: list) -> int:
     Edit asset rows in AppSheet, populating 'Row ID' for each row first.
     AppSheet requires the row key ('Row ID') for Edit operations; rows that
     cannot be resolved are skipped with a warning.
+    Row IDs are fetched in a single bulk call at the start of each upsert.
     """
     if not asset_rows:
         return 0
 
-    # Extract the base picsafe_id (strip _edited suffix if present) for lookup
-    base_ids = [r["picsafe_id"].replace("_edited", "") for r in asset_rows]
-    row_id_map = _fetch_row_ids(list(set(base_ids)))
+    # Single bulk fetch of all Row IDs — avoids per-row API calls and rate limits
+    print(f"   🔍 Fetching Row ID map from AppSheet ({len(asset_rows)} rows to update)...")
+    row_id_map = _fetch_all_row_ids()
+    print(f"      ✅ Row ID map: {len(row_id_map)} entries")
 
     enriched = []
     for row in asset_rows:
