@@ -16,6 +16,7 @@ set -euo pipefail
 
 PICSAFE_DIR="$HOME/PicSafe"
 VENV_PYTHON="$PICSAFE_DIR/venv/bin/python3"
+export PATH="$PICSAFE_DIR/venv/bin:$PATH"   # ensure osxphotos and other venv tools are on PATH for subprocesses
 LOG_DIR="$PICSAFE_DIR/logs"
 LOG_FILE="$LOG_DIR/nightly_$(date '+%Y-%m-%d').log"
 
