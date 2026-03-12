@@ -464,10 +464,24 @@ def main():
 
         # ── Steps 2 & 3: Face Recognition + QA (quality-filtered) ────────
         face_status = get_face_status(p)
-        if face_status not in current_keywords:        tags_add.append(face_status)
+        # Guard (Mechanism E): osxphotos may return empty face_info from a stale SQLite
+        # cache, causing get_face_status() to return "facesfree" even when faces exist.
+        # If AppSheet DB already recorded a more authoritative status, trust the DB.
+        if face_status == "facesfree" and p.uuid in appsheet_existing:
+            db_face = appsheet_existing[p.uuid].get("face_status", "")
+            if db_face in ("facesmissing", "facescomplete"):
+                face_status = db_face
+        if face_status not in current_keywords:
+            tags_add.append(face_status)
         for fs in ("facesfree", "facesmissing", "facescomplete"):
             if fs != face_status and fs in current_keywords:
                 tags_remove.append(fs)
+        # Guard (Mechanism D): Apple Photos ML vision may re-add "facesfree" as a
+        # scene/content keyword between bridge runs.  When authoritative status is
+        # non-free, always schedule removal — even if "facesfree" isn't currently
+        # visible in current_keywords (Photos may have added it since last read).
+        if face_status != "facesfree" and "facesfree" not in tags_remove:
+            tags_remove.append("facesfree")
 
         # ── Step 4: AI Scene Analysis ──────────────────────────────────────
         if hasattr(p, "labels_normalized"):
